@@ -1,0 +1,22 @@
+# virtual envs (anywhere)
+venv/
+**/venv/
+
+# python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# env + secrets
+.env
+credentials.json
+token.json
+
+# temp audio (keep folder, ignore files)
+app/routers/temp_audio/*
+!app/routers/temp_audio/.gitkeep
+
+# IDE/OS
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Automated Appointment Agent</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>body{font-family:Inter,sans-serif;background:#0f172a}</style>
+</head>
+<body class="bg-slate-900 text-white min-h-screen flex items-center justify-center p-4">
+  <div class="container mx-auto p-8 bg-slate-800 rounded-xl shadow-lg w-full max-w-2xl">
+    <h1 class="text-3xl font-semibold text-emerald-400 text-center">Automated Appointment Agent</h1>
+    <p class="text-slate-400 mt-2 mb-6 text-center">Click “Start Call”, speak naturally, and pause—recording ends when you stop.</p>
+
+    <div class="flex items-center justify-center">
+      <button id="callButton" class="bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 px-6 rounded-full transition-all duration-300">
+        <span id="buttonText">Start Call</span>
+      </button>
+    </div>
+
+    <div id="statusMessage" class="mt-6 text-center text-slate-300"></div>
+
+    <div class="bg-slate-900/60 border border-slate-700 rounded-lg p-4 max-h-80 overflow-y-auto mt-6">
+      <div class="text-sm text-slate-400 mb-2">Transcript</div>
+      <div id="transcript" class="space-y-2 text-sm"></div>
+    </div>
+  </div>
+
+<script>
+  const callButton = document.getElementById('callButton');
+  const buttonText = document.getElementById('buttonText');
+  const statusMessage = document.getElementById('statusMessage');
+  const transcriptDiv = document.getElementById('transcript');
+
+  let sessionId = localStorage.getItem('sessionId');
+  if (!sessionId) { sessionId = crypto.randomUUID(); localStorage.setItem('sessionId', sessionId); }
+
+  let audioStream, mediaRecorder, audioChunks = [];
+  let isListening = false, isSpeaking = false;
+
+  // VAD tuned not to interrupt speech (same values you approved)
+  let audioCtx, sourceNode, analyser, vadInterval, hardStopTimer;
+  const SILENCE_MS = 1600;
+  const MIN_SPEECH_MS = 800;
+  const NO_SPEECH_FAILSAFE_MS = 6000;
+  const HARD_STOP_MS = 15000;
+  const AMP_SPEECH_THRESHOLD = 0.010;
+
+  let speechStartedAt = 0, lastNonSilent = 0;
+
+  const addLine = (role, text) => {
+    if (!text) return;
+    const row = document.createElement('div');
+    row.innerHTML = `<span class="text-slate-400">${role}:</span> <span class="text-slate-200">${text}</span>`;
+    transcriptDiv.appendChild(row);
+    transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
+  };
+
+  function updateStatus(t){ statusMessage.textContent = t; }
+  function setButtonState(s){
+    const map = {idle:'Start Call', listening:'Listening...', processing:'Processing...', speaking:'Speaking...'};
+    buttonText.textContent = map[s] || 'Start Call';
+    callButton.disabled = (s==='processing'||s==='speaking');
+  }
+
+  function startVAD() {
+    const buf = new Float32Array(analyser.fftSize);
+    speechStartedAt = performance.now();
+    lastNonSilent = speechStartedAt;
+
+    if (hardStopTimer) clearTimeout(hardStopTimer);
+    hardStopTimer = setTimeout(() => {
+      if (isListening && mediaRecorder?.state === 'recording') mediaRecorder.stop();
+    }, HARD_STOP_MS);
+
+    vadInterval = setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      let peak = 0;
+      for (let i=0;i<buf.length;i++) {
+        const v = Math.abs(buf[i]);
+        if (v > peak) peak = v;
+      }
+      const now = performance.now();
+      if (peak > AMP_SPEECH_THRESHOLD) lastNonSilent = now;
+
+      const spokeLongEnough = now - speechStartedAt > MIN_SPEECH_MS;
+      const silentLongEnough = now - lastNonSilent > SILENCE_MS;
+      const noSpeechFailsafe = (now - speechStartedAt > NO_SPEECH_FAILSAFE_MS) && (lastNonSilent === speechStartedAt);
+
+      if ((spokeLongEnough && silentLongEnough) || noSpeechFailsafe) {
+        if (isListening && mediaRecorder?.state === 'recording') mediaRecorder.stop();
+      }
+    }, 50);
+  }
+
+  function stopVAD(){
+    if (vadInterval) clearInterval(vadInterval);
+    vadInterval = null;
+    if (hardStopTimer) clearTimeout(hardStopTimer);
+    hardStopTimer = null;
+  }
+
+  async function startListening() {
+    if (isSpeaking) return;
+    if (!audioStream) {
+      audioStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 48000
+        }
+      });
+    }
+
+    mediaRecorder = new MediaRecorder(audioStream, { mimeType: 'audio/webm' });
+    audioChunks = [];
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+    mediaRecorder.onstop = () => {
+      stopVAD();
+      isListening = false;
+      if (audioChunks.length === 0) { setButtonState('idle'); return; }
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      sendAudioToServer(blob);
+    };
+
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode = audioCtx.createMediaStreamSource(audioStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    sourceNode.connect(analyser);
+
+    isListening = true;
+    setButtonState('listening');
+    updateStatus('Listening...');
+    mediaRecorder.start();
+    startVAD();
+  }
+
+  async function sendAudioToServer(audioBlob, init=false) {
+    setButtonState('processing');
+    updateStatus('Processing...');
+
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'recording.webm');
+    formData.append('session_id', sessionId);
+    if (init) formData.append('init', '1');
+
+    try {
+      const res = await fetch('http://127.0.0.1:8000/audio/process', { method: 'POST', body: formData });
+
+      const userText = decodeURIComponent(res.headers.get('X-User-Transcript') || '');
+      const botText  = decodeURIComponent(res.headers.get('X-Bot-Text') || '');
+      const calError = decodeURIComponent(res.headers.get('X-Calendar-Error') || '');
+      if (userText) addLine('You', userText);
+
+      if (!res.ok) {
+        const t = await res.text();
+        updateStatus(`Error: ${t}`);
+        setButtonState('idle');
+        return;
+      }
+
+      // If backend reported a calendar error, surface it visibly
+      if (calError) {
+        addLine('System', `Calendar error: ${calError}`);
+        updateStatus(`Calendar error: ${calError}`);
+      }
+
+      const botAudio = await res.blob();
+      const url = URL.createObjectURL(botAudio);
+      const audio = new Audio(url);
+      isSpeaking = true;
+      setButtonState('speaking');
+      updateStatus(botText || 'Speaking...');
+      audio.onended = () => {
+        isSpeaking = false;
+        addLine('Agent', botText);
+        startListening();
+      };
+      audio.play();
+    } catch (e) {
+      console.error(e);
+      updateStatus('Network error.');
+      setButtonState('idle');
+    }
+  }
+
+  // Initial "hello" ping to get the greeting immediately
+  callButton.addEventListener('click', async () => {
+    try {
+      if (!audioStream) {
+        audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            noiseSuppression: true,
+            echoCancellation: true,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 48000
+          }
+        });
+      }
+    } catch (err) {
+      console.error('mic error:', err);
+      updateStatus('Could not access microphone.');
+      return;
+    }
+    const tiny = new Blob([new Uint8Array([0])], { type: 'audio/webm' });
+    await sendAudioToServer(tiny, true);
+  });
+</script>
+
+
+</body>
+</html>
