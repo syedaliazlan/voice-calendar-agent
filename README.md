@@ -95,7 +95,8 @@ python -m http.server 5500
 # Option B: use VS Code “Live Server” extension
 ```
 
-<img width="1717" height="780" alt="image" src="https://github.com/user-attachments/assets/b53dd2fa-b694-40ed-8076-7ac6328afe2b" />
+<img width="1712" height="704" alt="image" src="https://github.com/user-attachments/assets/9c986b1b-adb1-4386-9a00-26c9741c53d2" />
+
 
 ## 🔌 API (for reference)
 `POST /audio/process` (multipart/form-data)
